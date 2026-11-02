@@ -14,18 +14,74 @@
     margin: 0; height: 100%; background: #000; overflow: hidden;
     overscroll-behavior: none; user-select: none; -webkit-user-select: none;
     -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+    font-family: -apple-system, system-ui, sans-serif;
   }
-  /* Поле игры — без чёлки и полоски «домой»; на компе ограничено шириной телефона */
-  #game {
+  /* Поле игры и слой интерфейса — без чёлки и полоски «домой»; на компе ограничены шириной телефона */
+  #game, #ui {
     position: fixed; left: 0; right: 0; margin: 0 auto; max-width: 480px;
     top: env(safe-area-inset-top); bottom: env(safe-area-inset-bottom);
     touch-action: none;
   }
   canvas { display: block; width: 100%; height: 100%; }
+  #ui { pointer-events: none; }
+  #ui > * { pointer-events: auto; }
+  button { font: inherit; -webkit-tap-highlight-color: transparent; }
+
+  #gear {
+    position: absolute; top: 0; right: 0; width: 48px; height: 46px; padding: 0;
+    background: none; border: 0; color: #888; display: flex; align-items: center; justify-content: center;
+  }
+  .arrow {
+    position: absolute; bottom: 16px; width: 72px; height: 72px; border-radius: 50%; border: 0; padding: 0;
+    background: rgba(255,255,255,0.08); color: #fff; touch-action: none;
+    display: none; align-items: center; justify-content: center;
+  }
+  body.btns .arrow { display: flex; }
+  .arrow.on { background: rgba(255,255,255,0.22); }
+  #btnL { left: 16px; }
+  #btnR { right: 16px; }
+
+  #settings {
+    position: absolute; inset: 0; background: rgba(0,0,0,0.94); color: #fff;
+    display: flex; flex-direction: column; justify-content: center; gap: 22px; padding: 24px;
+  }
+  #settings[hidden] { display: none; }
+  #settings h2 { margin: 0 0 4px; font-size: 26px; }
+  .label { font-size: 13px; color: #888; margin-bottom: 8px; }
+  .seg { display: flex; background: #151515; border-radius: 10px; padding: 3px; }
+  .seg button { flex: 1; border: 0; background: none; color: #aaa; font-size: 15px; padding: 10px 0; border-radius: 8px; }
+  .seg button.on { background: hsl(190,70%,50%); color: #000; font-weight: 600; }
+  .note { font-size: 12px; color: #666; }
+  #done { border: 0; border-radius: 12px; padding: 14px; font-size: 16px; font-weight: 600; background: #fff; color: #000; }
 </style>
 </head>
 <body>
 <div id="game"><canvas id="c"></canvas></div>
+<div id="ui">
+  <button id="gear" aria-label="Настройки">
+    <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+      <circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="7"/>
+      <path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/>
+    </svg>
+  </button>
+  <button class="arrow" id="btnL" aria-label="Влево">
+    <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>
+  </button>
+  <button class="arrow" id="btnR" aria-label="Вправо">
+    <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>
+  </button>
+  <div id="settings" hidden>
+    <h2>Настройки</h2>
+    <div><div class="label">Режим</div>
+      <div class="seg" data-key="mode"><button data-v="classic">Классика</button><button data-v="round">Круг</button></div></div>
+    <div><div class="label">Сложность</div>
+      <div class="seg" data-key="diff"><button data-v="easy">Лёгкая</button><button data-v="normal">Нормальная</button><button data-v="hard">Сложная</button></div></div>
+    <div><div class="label">Управление</div>
+      <div class="seg" data-key="ctrl"><button data-v="swipe">Палец</button><button data-v="buttons">Кнопки</button></div></div>
+    <div class="note">Смена режима или сложности начинает новую игру. Рекорд у каждого режима и сложности свой.</div>
+    <button id="done">Готово</button>
+  </div>
+</div>
 <script>
 'use strict';
 
@@ -33,21 +89,61 @@
 const W = 360;                    // логическая ширина поля, высота считается по экрану
 const HUD = 44;                   // высота верхней панели
 const COLS = 8, GAP = 4, SIDE = 8, BRICK_H = 16, BRICKS_TOP = HUD + 36;
-const BALL_R = 6;
-const PADDLE_W = 72, PADDLE_WIDE = 116, PADDLE_H = 10;
-const BASE_SPEED = 320;           // скорость мяча, единиц поля в секунду
+const BALL_R = 6, PADDLE_H = 10, BRICK_R = 9;
+const PADDLE_W = { classic: 72, round: 130 };   // в круге — длина дуги ракетки
+const WIDE = 1.6;                 // во сколько раз расширяет бонус
+const BASE_SPEED = { classic: 320, round: 270 };  // единиц поля в секунду
 const SENS = 1.3;                 // чувствительность свайпа
 const BONUS_CHANCE = 0.15, BONUS_TIME = 10, BONUS_FALL = 130;
-const MAX_LIVES = 5;
 const HUE = 190;                  // акцентный цвет (оттенок HSL)
+const DIFF = {
+  easy:   { name: 'лёгкая',     speed: 0.8, paddle: 1.25, lives: 5 },
+  normal: { name: 'нормальная', speed: 1,   paddle: 1,    lives: 3 },
+  hard:   { name: 'сложная',    speed: 1.2, paddle: 0.85, lives: 2 },
+};
+const MODE_NAME = { classic: 'классика', round: 'круг' };
 
-// Раскладки: '.' — пусто, '1' — обычный кирпич, '2' — на два удара
+// Классика: '.' — пусто, '1' — обычный кирпич, '2' — на два удара
 const LEVELS = [
   ['11111111', '11111111', '11111111', '11111111', '11111111'],
   ['...11...', '..1111..', '.111111.', '11111111', '22222222'],
   ['1.1.1.1.', '.2.2.2.2', '1.1.1.1.', '.2.2.2.2', '1.1.1.1.', '.1.1.1.1'],
   ['22222222', '2......2', '2.1111.2', '2.1111.2', '2......2', '22222222'],
   ['2..22..2', '12111121', '11111111', '1.2..2.1', '11111111', '22222222'],
+];
+
+// Круг: кирпичи-кружки, координаты от центра поля.
+// ring — кольцо из n мест радиуса r, pattern повторяется по кругу ('1', '2', '.')
+function ring(r, n, pattern, shift = 0) {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const ch = pattern[i % pattern.length];
+    if (ch === '.') continue;
+    const a = i / n * Math.PI * 2 + shift;
+    out.push({ x: r * Math.cos(a), y: r * Math.sin(a), hp: +ch });
+  }
+  return out;
+}
+const ROUND_LEVELS = [
+  () => [...ring(0, 1, '2'), ...ring(28, 8, '1'), ...ring(52, 14, '1'), ...ring(76, 20, '1')],
+  () => [...ring(0, 1, '2'), ...ring(30, 8, '2'), ...ring(56, 16, '1.'), ...ring(82, 24, '11.'), ...ring(106, 30, '1..')],
+  () => {   // спираль
+    const out = ring(0, 1, '2');
+    for (let r = 20, a = 0, i = 0; r < 112; i++) {
+      out.push({ x: r * Math.cos(a), y: r * Math.sin(a), hp: i % 6 ? 1 : 2 });
+      a += 22 / r; r += 80 / r;
+    }
+    return out;
+  },
+  () => [...ring(0, 1, '2'), ...ring(40, 12, '2'), ...ring(64, 18, '1'), ...ring(100, 28, '2')],
+  () => {   // звезда: 6 лучей и внешнее кольцо
+    const out = ring(0, 1, '2');
+    for (let k = 0; k < 6; k++) for (let j = 1; j <= 4; j++) {
+      const a = k * Math.PI / 3;
+      out.push({ x: j * 20 * Math.cos(a), y: j * 20 * Math.sin(a), hp: j === 4 ? 2 : 1 });
+    }
+    return [...out, ...ring(104, 24, '1.', Math.PI / 12)];
+  },
 ];
 
 const BONUSES = {
@@ -60,21 +156,40 @@ const BONUSES = {
 // ===== Состояние =====
 const cv = document.getElementById('c'), ctx = cv.getContext('2d');
 const area = document.getElementById('game');
+const panel = document.getElementById('settings');
 let H = 640, scale = 1, dpr = 1;
-const paddle = { x: W / 2, y: 590, w: PADDLE_W };
+let CX = W / 2, CY = 360, R = 170, RP = 164;   // круг: центр, радиус поля, радиус ракетки
+const SET = Object.assign({ mode: 'classic', diff: 'normal', ctrl: 'swipe' }, loadJSON('arkanoid.settings'));
+// x, y — ракетка в классике; a — угол ракетки в круге; w — ширина (в круге — длина дуги)
+const paddle = { x: W / 2, y: 590, w: PADDLE_W.classic, a: Math.PI / 2 };
 // state: serve (мяч на ракетке) | play | paused | clear (уровень пройден) | over
-const S = { state: 'serve', fresh: true, score: 0, best: loadBest(), newBest: false,
+const S = { state: 'serve', fresh: true, score: 0, best: 0, bestKey: '', newBest: false,
             lives: 3, level: 1, hits: 0, wideT: 0, slowT: 0, clearT: 0, overAt: 0 };
+// В круге координаты мячей, кирпичей и бонусов — от центра поля
 let bricks = [], balls = [], bonuses = [];
-const keys = {};
+const keys = {}, held = { l: false, r: false };
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const angDiff = (a, b) => Math.atan2(Math.sin(a - b), Math.cos(a - b));
+const isRound = () => SET.mode === 'round';
+const paddleBase = () => PADDLE_W[SET.mode] * DIFF[SET.diff].paddle;
 
+function loadJSON(key) {
+  try { return JSON.parse(localStorage.getItem(key)) || {}; } catch (e) { return {}; }
+}
 function loadBest() {
-  try { return +localStorage.getItem('arkanoid.best') || 0; } catch (e) { return 0; }
+  try {
+    // Рекорд первой версии переезжает в «классика, нормальная»
+    const old = localStorage.getItem('arkanoid.best');
+    if (old !== null) {
+      if (!localStorage.getItem('arkanoid.best.classic.normal')) localStorage.setItem('arkanoid.best.classic.normal', old);
+      localStorage.removeItem('arkanoid.best');
+    }
+    return +localStorage.getItem(S.bestKey) || 0;
+  } catch (e) { return 0; }
 }
 function saveBest() {
-  try { localStorage.setItem('arkanoid.best', S.best); } catch (e) {}
+  try { localStorage.setItem(S.bestKey, S.best); } catch (e) {}
 }
 
 function resize() {
@@ -84,24 +199,35 @@ function resize() {
   cv.height = Math.round(r.height * dpr);
   scale = r.width / W;
   H = r.height / scale;
-  paddle.y = H - 48;
+  const btns = SET.ctrl === 'buttons';   // с кнопками всё поднимается над ними
+  paddle.y = H - (btns ? 104 : 48);
+  R = W / 2 - 10; RP = R - 6;
+  CX = W / 2; CY = HUD + (H - HUD - (btns ? 95 : 0)) / 2;
 }
 
 // ===== Ход игры =====
 function newGame() {
-  S.score = 0; S.lives = 3; S.level = 1; S.newBest = false;
+  S.score = 0; S.lives = DIFF[SET.diff].lives; S.level = 1; S.newBest = false;
+  S.bestKey = `arkanoid.best.${SET.mode}.${SET.diff}`;
+  S.best = loadBest();
+  paddle.w = paddleBase(); paddle.a = Math.PI / 2;
   loadLevel();
 }
 
 function loadLevel() {
-  const map = LEVELS[(S.level - 1) % LEVELS.length];
-  const bw = (W - SIDE * 2 - GAP * (COLS - 1)) / COLS;
   bricks = [];
-  map.forEach((row, r) => [...row].forEach((ch, c) => {
-    if (ch === '.') return;
-    bricks.push({ x: SIDE + c * (bw + GAP), y: BRICKS_TOP + r * (BRICK_H + GAP),
-                  w: bw, h: BRICK_H, hp: +ch, row: r });
-  }));
+  if (isRound()) {
+    for (const b of ROUND_LEVELS[(S.level - 1) % ROUND_LEVELS.length]())
+      bricks.push({ ...b, row: Math.round(Math.hypot(b.x, b.y) / 24) });
+  } else {
+    const map = LEVELS[(S.level - 1) % LEVELS.length];
+    const bw = (W - SIDE * 2 - GAP * (COLS - 1)) / COLS;
+    map.forEach((row, r) => [...row].forEach((ch, c) => {
+      if (ch === '.') return;
+      bricks.push({ x: SIDE + c * (bw + GAP), y: BRICKS_TOP + r * (BRICK_H + GAP),
+                    w: bw, h: BRICK_H, hp: +ch, row: r });
+    }));
+  }
   resetRound();
 }
 
@@ -109,19 +235,24 @@ function loadLevel() {
 function resetRound() {
   S.hits = 0; S.wideT = 0; S.slowT = 0;
   bonuses = [];
-  balls = [{ x: paddle.x, y: paddle.y - BALL_R, vx: 0, vy: 0 }];
+  balls = [{ x: 0, y: 0, vx: 0, vy: 0 }];
   S.state = 'serve';
 }
 
-// Скорость: +15% за каждый круг из 5 уровней, разгон от ударов до +40%, бонус «медленно»
+// Скорость: сложность, +15% за каждый круг из 5 уровней, разгон от ударов до +40%, бонус «медленно»
 function speed() {
-  const cycle = Math.floor((S.level - 1) / LEVELS.length);
-  return BASE_SPEED * (1 + 0.15 * cycle) * Math.min(1.4, 1 + S.hits * 0.006) * (S.slowT > 0 ? 0.65 : 1);
+  const cycle = Math.floor((S.level - 1) / 5);
+  return BASE_SPEED[SET.mode] * DIFF[SET.diff].speed * (1 + 0.15 * cycle)
+       * Math.min(1.4, 1 + S.hits * 0.006) * (S.slowT > 0 ? 0.65 : 1);
 }
 
 function launch() {
   const a = (Math.random() * 40 - 20) * Math.PI / 180, v = speed(), b = balls[0];
-  b.vx = v * Math.sin(a); b.vy = -v * Math.cos(a);
+  if (isRound()) {   // от ракетки к центру
+    b.vx = v * Math.cos(paddle.a + Math.PI + a); b.vy = v * Math.sin(paddle.a + Math.PI + a);
+  } else {
+    b.vx = v * Math.sin(a); b.vy = -v * Math.cos(a);
+  }
   S.state = 'play'; S.fresh = false;
 }
 
@@ -134,14 +265,28 @@ function loseLife() {
 function applyBonus(k) {
   if (k === 'wide') S.wideT = BONUS_TIME;
   else if (k === 'slow') S.slowT = BONUS_TIME;
-  else if (k === 'life') S.lives = Math.min(MAX_LIVES, S.lives + 1);
+  else if (k === 'life') S.lives = Math.min(DIFF[SET.diff].lives + 2, S.lives + 1);
   else if (k === 'multi' && balls.length) {
-    const src = balls[0], v = Math.hypot(src.vx, src.vy), base = Math.atan2(src.vx, -src.vy);
+    const src = balls[0], v = Math.hypot(src.vx, src.vy), base = Math.atan2(src.vy, src.vx);
     for (const d of [-25, 25]) {
       const a = base + d * Math.PI / 180;
-      balls.push({ x: src.x, y: src.y, vx: v * Math.sin(a), vy: -v * Math.cos(a) });
+      balls.push({ x: src.x, y: src.y, vx: v * Math.cos(a), vy: v * Math.sin(a) });
     }
   }
+}
+
+// Удар по кирпичу i: очки, разрушение, может выпасть бонус
+function damage(i, bx, by) {
+  const k = bricks[i];
+  S.score += 10; S.hits++;
+  if (S.score > S.best) { S.best = S.score; S.newBest = true; }
+  if (--k.hp > 0) return;
+  bricks.splice(i, 1);
+  if (Math.random() >= BONUS_CHANCE) return;
+  const kinds = Object.keys(BONUSES), kind = kinds[Math.floor(Math.random() * kinds.length)];
+  // В классике бонус падает вниз, в круге — наружу от центра
+  const a = isRound() ? (bx || by ? Math.atan2(by, bx) : Math.random() * Math.PI * 2) : Math.PI / 2;
+  bonuses.push({ x: bx, y: by, dx: Math.cos(a), dy: Math.sin(a), k: kind });
 }
 
 function hitBrick(b) {
@@ -149,22 +294,14 @@ function hitBrick(b) {
     const k = bricks[i];
     const cx = clamp(b.x, k.x, k.x + k.w), cy = clamp(b.y, k.y, k.y + k.h);
     if ((b.x - cx) ** 2 + (b.y - cy) ** 2 >= BALL_R * BALL_R) continue;
-    S.score += 10; S.hits++;
-    if (S.score > S.best) { S.best = S.score; S.newBest = true; }
-    if (--k.hp <= 0) {
-      bricks.splice(i, 1);
-      if (Math.random() < BONUS_CHANCE) {
-        const kinds = Object.keys(BONUSES);
-        bonuses.push({ x: k.x + k.w / 2, y: k.y + k.h / 2, k: kinds[Math.floor(Math.random() * kinds.length)] });
-      }
-    }
+    damage(i, k.x + k.w / 2, k.y + k.h / 2);
     return true;
   }
   return false;
 }
 
-// Один маленький шаг мяча: по X и по Y отдельно, чтобы понять, от какой стороны отскакивать
-function step(b, h) {
+// Классика: шаг по X и по Y отдельно, чтобы понять, от какой стороны отскакивать
+function stepClassic(b, h) {
   b.x += b.vx * h;
   if (b.x < BALL_R) { b.x = BALL_R; b.vx = Math.abs(b.vx); }
   else if (b.x > W - BALL_R) { b.x = W - BALL_R; b.vx = -Math.abs(b.vx); }
@@ -183,12 +320,56 @@ function step(b, h) {
   if (b.y > H + BALL_R) b.dead = true;
 }
 
-function update(dt) {
-  paddle.x += ((keys.ArrowRight ? 1 : 0) - (keys.ArrowLeft ? 1 : 0)) * 450 * dt;
-  paddle.w += ((S.wideT > 0 ? PADDLE_WIDE : PADDLE_W) - paddle.w) * Math.min(1, dt * 12);
-  paddle.x = clamp(paddle.x, paddle.w / 2, W - paddle.w / 2);
+// Круг: отскок от кирпичей-кружков по линии центров, ракетка — дуга по краю
+function stepRound(b, h) {
+  b.x += b.vx * h; b.y += b.vy * h;
+  for (let i = 0; i < bricks.length; i++) {
+    const k = bricks[i], dx = b.x - k.x, dy = b.y - k.y, d = Math.hypot(dx, dy) || 1, min = BRICK_R + BALL_R;
+    if (d >= min) continue;
+    const nx = dx / d, ny = dy / d, dot = b.vx * nx + b.vy * ny;
+    if (dot < 0) { b.vx -= 2 * dot * nx; b.vy -= 2 * dot * ny; }
+    b.x = k.x + nx * min; b.y = k.y + ny * min;
+    damage(i, k.x, k.y);
+    break;
+  }
+  const d = Math.hypot(b.x, b.y), edge = RP - PADDLE_H / 2 - BALL_R;
+  if (d >= edge && d < edge + 8 && b.vx * b.x + b.vy * b.y > 0) {
+    const ang = Math.atan2(b.y, b.x), off = angDiff(ang, paddle.a), half = paddle.w / 2 / RP;
+    if (Math.abs(off) <= half + BALL_R / RP) {
+      // Как в классике: попал ближе к краю ракетки — мяч уходит в ту сторону, до 60°
+      const t = clamp(off / half, -1, 1), dir = ang + Math.PI - t * 60 * Math.PI / 180;
+      const v = Math.hypot(b.vx, b.vy);
+      b.vx = v * Math.cos(dir); b.vy = v * Math.sin(dir);
+      b.x = edge * Math.cos(ang); b.y = edge * Math.sin(ang);
+    }
+  }
+  if (d > R + 30) b.dead = true;
+}
 
-  if (S.state === 'serve') { balls[0].x = paddle.x; balls[0].y = paddle.y - BALL_R; return; }
+function caught(p) {
+  if (!isRound()) return p.y + 7 >= paddle.y && p.y - 7 <= paddle.y + PADDLE_H && Math.abs(p.x - paddle.x) <= paddle.w / 2 + 14;
+  const d = Math.hypot(p.x, p.y);
+  return d >= RP - PADDLE_H / 2 - 7 && d <= RP + PADDLE_H / 2 + 7
+      && Math.abs(angDiff(Math.atan2(p.y, p.x), paddle.a)) <= (paddle.w / 2 + 14) / RP;
+}
+
+function update(dt) {
+  const dir = (keys.ArrowRight || held.r ? 1 : 0) - (keys.ArrowLeft || held.l ? 1 : 0);
+  paddle.w += ((S.wideT > 0 ? paddleBase() * WIDE : paddleBase()) - paddle.w) * Math.min(1, dt * 12);
+  if (isRound()) {
+    paddle.a = angDiff(paddle.a + dir * 520 / RP * dt, 0);   // → — по часовой
+  } else {
+    paddle.x = clamp(paddle.x + dir * 450 * dt, paddle.w / 2, W - paddle.w / 2);
+  }
+
+  if (S.state === 'serve') {
+    const b = balls[0];
+    if (isRound()) {
+      const d = RP - PADDLE_H / 2 - BALL_R;
+      b.x = d * Math.cos(paddle.a); b.y = d * Math.sin(paddle.a);
+    } else { b.x = paddle.x; b.y = paddle.y - BALL_R; }
+    return;
+  }
   if (S.state === 'clear') {
     S.clearT -= dt;
     if (S.clearT <= 0) { S.level++; loadLevel(); }
@@ -198,12 +379,12 @@ function update(dt) {
 
   S.wideT = Math.max(0, S.wideT - dt);
   S.slowT = Math.max(0, S.slowT - dt);
-  const v = speed();
+  const v = speed(), step = isRound() ? stepRound : stepClassic;
   for (const b of balls) {
-    // Держим нужную скорость и не даём мячу залипнуть в почти горизонтальном полёте
     const len = Math.hypot(b.vx, b.vy) || 1;
     b.vx = b.vx / len * v; b.vy = b.vy / len * v;
-    if (Math.abs(b.vy) < v * 0.3) {
+    // В классике не даём мячу залипнуть в почти горизонтальном полёте
+    if (!isRound() && Math.abs(b.vy) < v * 0.3) {
       b.vy = Math.sign(b.vy || -1) * v * 0.3;
       b.vx = Math.sign(b.vx || 1) * Math.sqrt(v * v - b.vy * b.vy);
     }
@@ -213,11 +394,9 @@ function update(dt) {
   balls = balls.filter(b => !b.dead);
 
   for (const p of bonuses) {
-    p.y += BONUS_FALL * dt;
-    if (p.y + 7 >= paddle.y && p.y - 7 <= paddle.y + PADDLE_H && Math.abs(p.x - paddle.x) <= paddle.w / 2 + 14) {
-      p.dead = true; applyBonus(p.k);
-    }
-    if (p.y > H + 20) p.dead = true;
+    p.x += p.dx * BONUS_FALL * dt; p.y += p.dy * BONUS_FALL * dt;
+    if (caught(p)) { p.dead = true; applyBonus(p.k); }
+    else if (isRound() ? Math.hypot(p.x, p.y) > R + 30 : p.y > H + 20) p.dead = true;
   }
   bonuses = bonuses.filter(p => !p.dead);
 
@@ -238,59 +417,86 @@ function text(s, x, y, size, color, weight = 400, align = 'center') {
   ctx.fillText(s, x, y);
 }
 
-function message(lines) {
-  let y = H * 0.6 - (lines.length - 1) * 14;
+// Сообщение на тёмной подложке, чтобы читалось поверх кирпичей
+function message(lines, cy) {
+  const h = lines.length * 28 + 16;
+  ctx.fillStyle = 'rgba(0,0,0,0.78)'; rr(30, cy - h / 2, W - 60, h, 14);
+  let y = cy - h / 2 + 22;
   for (const [s, size, color, weight] of lines) { text(s, W / 2, y, size, color, weight); y += 28; }
+}
+
+function brickColor(k) {
+  return k.hp > 1 ? `hsl(${HUE},90%,82%)` : `hsl(${HUE},70%,${68 - k.row * 5}%)`;
+}
+
+function drawBonus(p) {
+  ctx.fillStyle = '#fff'; rr(p.x - 14, p.y - 7, 28, 14, 7);
+  text(BONUSES[p.k], p.x, p.y + 1, 10, '#000', 700);
+}
+
+function drawBalls() {
+  ctx.fillStyle = '#fff';
+  for (const b of balls) { ctx.beginPath(); ctx.arc(b.x, b.y, BALL_R, 0, Math.PI * 2); ctx.fill(); }
 }
 
 function draw() {
   ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
   ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
 
-  // Верхняя панель: счёт и рекорд, уровень, жизни
+  // Верхняя панель: счёт и рекорд, уровень и режим, жизни (справа — шестерёнка)
   text(String(S.score), 12, 17, 20, '#fff', 600, 'left');
   text(`рекорд ${S.best}`, 12, 36, 11, '#777', 400, 'left');
-  text(`Уровень ${S.level}`, W / 2, 22, 13, '#999');
+  text(`Уровень ${S.level}`, W / 2, 16, 13, '#999');
+  text(`${MODE_NAME[SET.mode]} · ${DIFF[SET.diff].name}`, W / 2, 33, 10, '#555');
   ctx.fillStyle = '#fff';
   for (let i = 0; i < S.lives; i++) {
-    ctx.beginPath(); ctx.arc(W - 14 - i * 13, 22, 4, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(W - 54 - i * 13, 22, 4, 0, Math.PI * 2); ctx.fill();
   }
   ctx.fillStyle = '#1a1a1a'; ctx.fillRect(0, HUD - 1, W, 1);
 
-  for (const k of bricks) {
-    ctx.fillStyle = k.hp > 1 ? `hsl(${HUE},90%,82%)` : `hsl(${HUE},70%,${68 - k.row * 5}%)`;
-    rr(k.x, k.y, k.w, k.h, 3);
+  if (isRound()) {
+    ctx.save(); ctx.translate(CX, CY);
+    ctx.strokeStyle = '#1c1c1c'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(0, 0, R, 0, Math.PI * 2); ctx.stroke();
+    for (const k of bricks) {
+      ctx.fillStyle = brickColor(k);
+      ctx.beginPath(); ctx.arc(k.x, k.y, BRICK_R, 0, Math.PI * 2); ctx.fill();
+    }
+    bonuses.forEach(drawBonus);
+    const half = paddle.w / 2 / RP;
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = PADDLE_H; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.arc(0, 0, RP, paddle.a - half, paddle.a + half); ctx.stroke();
+    drawBalls();
+    ctx.restore();
+  } else {
+    for (const k of bricks) { ctx.fillStyle = brickColor(k); rr(k.x, k.y, k.w, k.h, 3); }
+    bonuses.forEach(drawBonus);
+    ctx.fillStyle = '#fff';
+    rr(paddle.x - paddle.w / 2, paddle.y, paddle.w, PADDLE_H, 5);
+    drawBalls();
   }
 
-  for (const p of bonuses) {
-    ctx.fillStyle = '#fff'; rr(p.x - 14, p.y - 7, 28, 14, 7);
-    text(BONUSES[p.k], p.x, p.y + 1, 10, '#000', 700);
-  }
-
-  ctx.fillStyle = '#fff';
-  rr(paddle.x - paddle.w / 2, paddle.y, paddle.w, PADDLE_H, 5);
-  for (const b of balls) { ctx.beginPath(); ctx.arc(b.x, b.y, BALL_R, 0, Math.PI * 2); ctx.fill(); }
-
-  // Оставшееся время бонусов — под ракеткой
+  // Оставшееся время бонусов
   const fx = [];
   if (S.wideT > 0) fx.push(`↔ ${Math.ceil(S.wideT)}`);
   if (S.slowT > 0) fx.push(`½ ${Math.ceil(S.slowT)}`);
-  if (fx.length) text(fx.join('    '), W / 2, H - 16, 12, '#777');
+  if (fx.length) text(fx.join('    '), W / 2, isRound() ? CY + R + 18 : H - 16, 12, '#777');
 
-  const dim = '#999', acc = `hsl(${HUE},80%,70%)`;
+  const dim = '#999', acc = `hsl(${HUE},80%,70%)`, my = isRound() ? CY : H * 0.6;
+  const hint = SET.ctrl === 'buttons' ? 'двигайте ракетку кнопками внизу' : 'ведите пальцем в любом месте';
   if (S.state === 'serve') {
     message(S.fresh
-      ? [['АРКАНОИД', 28, '#fff', 700], ['ведите пальцем в любом месте', 13, dim], ['коснитесь, чтобы начать', 15, acc, 600]]
-      : [[`Уровень ${S.level}`, 20, '#fff', 600], ['коснитесь, чтобы запустить', 15, acc, 600]]);
+      ? [['АРКАНОИД', 28, '#fff', 700], [hint, 13, dim], ['коснитесь, чтобы начать', 15, acc, 600]]
+      : [[`Уровень ${S.level}`, 20, '#fff', 600], ['коснитесь, чтобы запустить', 15, acc, 600]], my);
   } else if (S.state === 'paused') {
-    message([['Пауза', 24, '#fff', 700], ['коснитесь, чтобы продолжить', 15, acc, 600]]);
+    message([['Пауза', 24, '#fff', 700], ['коснитесь, чтобы продолжить', 15, acc, 600]], my);
   } else if (S.state === 'clear') {
-    message([[`Уровень ${S.level} пройден`, 22, '#fff', 700]]);
+    message([[`Уровень ${S.level} пройден`, 22, '#fff', 700]], my);
   } else if (S.state === 'over') {
-    ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.fillRect(0, HUD, W, H - HUD);
+    ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, HUD, W, H - HUD);
     message([['Игра окончена', 26, '#fff', 700], [`Счёт ${S.score}`, 18, '#fff'],
              S.newBest ? ['Новый рекорд!', 16, acc, 600] : [`Рекорд ${S.best}`, 15, dim],
-             ['коснитесь, чтобы сыграть ещё', 15, acc, 600]]);
+             ['коснитесь, чтобы сыграть ещё', 15, acc, 600]], my);
   }
 }
 
@@ -301,13 +507,20 @@ function tap() {
   else if (S.state === 'over' && performance.now() - S.overAt > 700) newGame();
 }
 
-// Палец: ракетка сдвигается на столько же, на сколько сдвинулся палец (в любом месте экрана)
+// Палец: ракетка сдвигается на столько же, на сколько сдвинулся палец (в любом месте экрана).
+// В круге свайп вправо крутит ракетку по часовой.
 let touch = null;
 area.addEventListener('pointerdown', e => { touch = { x0: e.clientX, last: e.clientX, t: performance.now() }; });
 area.addEventListener('pointermove', e => {
-  if (e.pointerType === 'mouse') { paddle.x = (e.clientX - area.getBoundingClientRect().left) / scale; return; }
+  if (SET.ctrl === 'buttons') return;
+  if (e.pointerType === 'mouse') {   // мышь на компе — ракетка под курсором
+    const r = area.getBoundingClientRect(), mx = (e.clientX - r.left) / scale, my = (e.clientY - r.top) / scale;
+    if (isRound()) paddle.a = Math.atan2(my - CY, mx - CX); else paddle.x = mx;
+    return;
+  }
   if (!touch) return;
-  paddle.x += (e.clientX - touch.last) / scale * SENS;
+  const dx = (e.clientX - touch.last) / scale * SENS;
+  if (isRound()) paddle.a += dx / RP; else paddle.x += dx;
   touch.last = e.clientX;
 });
 area.addEventListener('pointerup', e => {
@@ -316,9 +529,45 @@ area.addEventListener('pointerup', e => {
 });
 area.addEventListener('pointercancel', () => { touch = null; });
 
+// Кнопки ← → : держите — ракетка едет
+for (const [id, k] of [['btnL', 'l'], ['btnR', 'r']]) {
+  const el = document.getElementById(id);
+  const set = v => e => { e.preventDefault(); held[k] = v; el.classList.toggle('on', v); };
+  el.addEventListener('pointerdown', set(true));
+  for (const ev of ['pointerup', 'pointercancel', 'pointerleave']) el.addEventListener(ev, set(false));
+}
+
 // Клавиатура — для проверки на компе
-addEventListener('keydown', e => { keys[e.key] = true; if (e.key === ' ') tap(); });
+addEventListener('keydown', e => { keys[e.key] = true; if (e.key === ' ' && panel.hidden) tap(); });
 addEventListener('keyup', e => { keys[e.key] = false; });
+
+// ===== Экран настроек =====
+let before = null;
+function renderSettings() {
+  for (const seg of panel.querySelectorAll('.seg'))
+    for (const b of seg.children) b.classList.toggle('on', b.dataset.v === SET[seg.dataset.key]);
+}
+function applyCtrl() {
+  document.body.classList.toggle('btns', SET.ctrl === 'buttons');
+  resize();
+}
+document.getElementById('gear').addEventListener('click', () => {
+  if (S.state === 'play') S.state = 'paused';
+  before = { ...SET };
+  renderSettings();
+  panel.hidden = false;
+});
+for (const seg of panel.querySelectorAll('.seg'))
+  for (const b of seg.children) b.addEventListener('click', () => { SET[seg.dataset.key] = b.dataset.v; renderSettings(); });
+document.getElementById('done').addEventListener('click', () => {
+  panel.hidden = true;
+  try { localStorage.setItem('arkanoid.settings', JSON.stringify(SET)); } catch (e) {}
+  applyCtrl();
+  if (SET.mode !== before.mode || SET.diff !== before.diff) {
+    saveBest();   // рекорд старого режима
+    newGame(); S.fresh = true;
+  }
+});
 
 // Свернули Safari — пауза и сохранение рекорда
 document.addEventListener('visibilitychange', () => {
@@ -328,7 +577,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 addEventListener('resize', resize);
-resize();
+applyCtrl();
 newGame();
 
 let last = performance.now();
