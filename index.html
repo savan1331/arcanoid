@@ -89,7 +89,8 @@
 const W = 360;                    // логическая ширина поля, высота считается по экрану
 const HUD = 44;                   // высота верхней панели
 const COLS = 8, GAP = 4, SIDE = 8, BRICK_H = 16, BRICKS_TOP = HUD + 36;
-const BALL_R = 6, PADDLE_H = 10, BRICK_R = 9;
+const BALL_R = 6, PADDLE_H = 10;
+const CELL = 18, PITCH = 21;      // круг: сторона квадратного кирпича и шаг сетки
 const PADDLE_W = { classic: 72, round: 130 };   // в круге — длина дуги ракетки
 const WIDE = 1.6;                 // во сколько раз расширяет бонус
 const BASE_SPEED = { classic: 320, round: 270 };  // единиц поля в секунду
@@ -112,38 +113,18 @@ const LEVELS = [
   ['2..22..2', '12111121', '11111111', '1.2..2.1', '11111111', '22222222'],
 ];
 
-// Круг: кирпичи-кружки, координаты от центра поля.
-// ring — кольцо из n мест радиуса r, pattern повторяется по кругу ('1', '2', '.')
-function ring(r, n, pattern, shift = 0) {
-  const out = [];
-  for (let i = 0; i < n; i++) {
-    const ch = pattern[i % pattern.length];
-    if (ch === '.') continue;
-    const a = i / n * Math.PI * 2 + shift;
-    out.push({ x: r * Math.cos(a), y: r * Math.sin(a), hp: +ch });
-  }
-  return out;
-}
+// Круг: квадратные кирпичи на сетке 11×11 вокруг центра поля.
+// Уровень — функция от смещения клетки (dx, dy) и расстояния d в клетках: 0 — пусто, 1/2 — прочность
 const ROUND_LEVELS = [
-  () => [...ring(0, 1, '2'), ...ring(28, 8, '1'), ...ring(52, 14, '1'), ...ring(76, 20, '1')],
-  () => [...ring(0, 1, '2'), ...ring(30, 8, '2'), ...ring(56, 16, '1.'), ...ring(82, 24, '11.'), ...ring(106, 30, '1..')],
-  () => {   // спираль
-    const out = ring(0, 1, '2');
-    for (let r = 20, a = 0, i = 0; r < 112; i++) {
-      out.push({ x: r * Math.cos(a), y: r * Math.sin(a), hp: i % 6 ? 1 : 2 });
-      a += 22 / r; r += 80 / r;
-    }
-    return out;
+  (dx, dy, d) => d <= 4.3 ? (d < 1 ? 2 : 1) : 0,                                                  // диск
+  (dx, dy, d) => d <= 1 ? 2 : d > 2.3 && d <= 3.3 ? 1 : d > 4.3 && d <= 5.2 ? 1 + (dx + dy & 1) : 0, // кольца
+  (dx, dy) => {                                                                                   // ромб
+    const s = Math.abs(dx) + Math.abs(dy);
+    return s <= 1 ? 2 : s === 3 || s > 5 ? 0 : s === 5 ? 2 : 1;
   },
-  () => [...ring(0, 1, '2'), ...ring(40, 12, '2'), ...ring(64, 18, '1'), ...ring(100, 28, '2')],
-  () => {   // звезда: 6 лучей и внешнее кольцо
-    const out = ring(0, 1, '2');
-    for (let k = 0; k < 6; k++) for (let j = 1; j <= 4; j++) {
-      const a = k * Math.PI / 3;
-      out.push({ x: j * 20 * Math.cos(a), y: j * 20 * Math.sin(a), hp: j === 4 ? 2 : 1 });
-    }
-    return [...out, ...ring(104, 24, '1.', Math.PI / 12)];
-  },
+  (dx, dy, d) => d <= 1 ? 2 : (Math.abs(dx) <= 1 || Math.abs(dy) <= 1) && d <= 3.3 ? 1             // крест в кольце
+               : d > 4.3 && d <= 5.2 ? 2 : 0,
+  (dx, dy, d) => d <= 5.2 && !(dx + dy & 1) ? (d > 4 ? 2 : 1) : 0,                                 // шахматный диск
 ];
 
 const BONUSES = {
@@ -167,7 +148,8 @@ const S = { state: 'serve', fresh: true, score: 0, best: 0, bestKey: '', newBest
             lives: 3, level: 1, hits: 0, wideT: 0, slowT: 0, clearT: 0, overAt: 0 };
 // В круге координаты мячей, кирпичей и бонусов — от центра поля
 let bricks = [], balls = [], bonuses = [];
-const keys = {}, held = { l: false, r: false };
+// Зажатые ← → (кнопки или клавиатура); lSpin/rSpin — направление вращения в круге, взятое в момент нажатия
+const held = { l: false, r: false, lSpin: -1, rSpin: 1 };
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const angDiff = (a, b) => Math.atan2(Math.sin(a - b), Math.cos(a - b));
@@ -217,8 +199,11 @@ function newGame() {
 function loadLevel() {
   bricks = [];
   if (isRound()) {
-    for (const b of ROUND_LEVELS[(S.level - 1) % ROUND_LEVELS.length]())
-      bricks.push({ ...b, row: Math.round(Math.hypot(b.x, b.y) / 24) });
+    const lv = ROUND_LEVELS[(S.level - 1) % ROUND_LEVELS.length];
+    for (let dy = -5; dy <= 5; dy++) for (let dx = -5; dx <= 5; dx++) {
+      const d = Math.hypot(dx, dy), hp = lv(dx, dy, d);
+      if (hp) bricks.push({ x: dx * PITCH - CELL / 2, y: dy * PITCH - CELL / 2, w: CELL, h: CELL, hp, row: Math.round(d) });
+    }
   } else {
     const map = LEVELS[(S.level - 1) % LEVELS.length];
     const bw = (W - SIDE * 2 - GAP * (COLS - 1)) / COLS;
@@ -320,18 +305,12 @@ function stepClassic(b, h) {
   if (b.y > H + BALL_R) b.dead = true;
 }
 
-// Круг: отскок от кирпичей-кружков по линии центров, ракетка — дуга по краю
+// Круг: кирпичи квадратные — отскок как в классике, ракетка — дуга по краю
 function stepRound(b, h) {
-  b.x += b.vx * h; b.y += b.vy * h;
-  for (let i = 0; i < bricks.length; i++) {
-    const k = bricks[i], dx = b.x - k.x, dy = b.y - k.y, d = Math.hypot(dx, dy) || 1, min = BRICK_R + BALL_R;
-    if (d >= min) continue;
-    const nx = dx / d, ny = dy / d, dot = b.vx * nx + b.vy * ny;
-    if (dot < 0) { b.vx -= 2 * dot * nx; b.vy -= 2 * dot * ny; }
-    b.x = k.x + nx * min; b.y = k.y + ny * min;
-    damage(i, k.x, k.y);
-    break;
-  }
+  b.x += b.vx * h;
+  if (hitBrick(b)) { b.x -= b.vx * h; b.vx = -b.vx; }
+  b.y += b.vy * h;
+  if (hitBrick(b)) { b.y -= b.vy * h; b.vy = -b.vy; }
   const d = Math.hypot(b.x, b.y), edge = RP - PADDLE_H / 2 - BALL_R;
   if (d >= edge && d < edge + 8 && b.vx * b.x + b.vy * b.y > 0) {
     const ang = Math.atan2(b.y, b.x), off = angDiff(ang, paddle.a), half = paddle.w / 2 / RP;
@@ -354,11 +333,12 @@ function caught(p) {
 }
 
 function update(dt) {
-  const dir = (keys.ArrowRight || held.r ? 1 : 0) - (keys.ArrowLeft || held.l ? 1 : 0);
   paddle.w += ((S.wideT > 0 ? paddleBase() * WIDE : paddleBase()) - paddle.w) * Math.min(1, dt * 12);
   if (isRound()) {
-    paddle.a = angDiff(paddle.a + dir * 520 / RP * dt, 0);   // → — по часовой
+    const spin = (held.r ? held.rSpin : 0) + (held.l ? held.lSpin : 0);
+    paddle.a = angDiff(paddle.a + spin * 520 / RP * dt, 0);
   } else {
+    const dir = (held.r ? 1 : 0) - (held.l ? 1 : 0);
     paddle.x = clamp(paddle.x + dir * 450 * dt, paddle.w / 2, W - paddle.w / 2);
   }
 
@@ -458,10 +438,7 @@ function draw() {
     ctx.save(); ctx.translate(CX, CY);
     ctx.strokeStyle = '#1c1c1c'; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.arc(0, 0, R, 0, Math.PI * 2); ctx.stroke();
-    for (const k of bricks) {
-      ctx.fillStyle = brickColor(k);
-      ctx.beginPath(); ctx.arc(k.x, k.y, BRICK_R, 0, Math.PI * 2); ctx.fill();
-    }
+    for (const k of bricks) { ctx.fillStyle = brickColor(k); rr(k.x, k.y, k.w, k.h, 3); }
     bonuses.forEach(drawBonus);
     const half = paddle.w / 2 / RP;
     ctx.strokeStyle = '#fff'; ctx.lineWidth = PADDLE_H; ctx.lineCap = 'round';
@@ -507,10 +484,15 @@ function tap() {
   else if (S.state === 'over' && performance.now() - S.overAt > 700) newGame();
 }
 
-// Палец: ракетка сдвигается на столько же, на сколько сдвинулся палец (в любом месте экрана).
-// В круге свайп вправо крутит ракетку по часовой.
+// В круге «вправо» — это вправо по экрану от того места, где ракетка стоит в момент нажатия:
+// внизу круга — против часовой, вверху — по часовой. Дальше, пока держите, ракетка едет по кругу.
+const rightSpin = () => Math.sin(paddle.a) < 0 ? 1 : -1;
+
+// Палец: ракетка сдвигается на столько же, на сколько сдвинулся палец (в любом месте экрана)
 let touch = null;
-area.addEventListener('pointerdown', e => { touch = { x0: e.clientX, last: e.clientX, t: performance.now() }; });
+area.addEventListener('pointerdown', e => {
+  touch = { x0: e.clientX, last: e.clientX, t: performance.now(), spin: rightSpin() };
+});
 area.addEventListener('pointermove', e => {
   if (SET.ctrl === 'buttons') return;
   if (e.pointerType === 'mouse') {   // мышь на компе — ракетка под курсором
@@ -520,7 +502,7 @@ area.addEventListener('pointermove', e => {
   }
   if (!touch) return;
   const dx = (e.clientX - touch.last) / scale * SENS;
-  if (isRound()) paddle.a += dx / RP; else paddle.x += dx;
+  if (isRound()) paddle.a += dx / RP * touch.spin; else paddle.x += dx;
   touch.last = e.clientX;
 });
 area.addEventListener('pointerup', e => {
@@ -529,17 +511,26 @@ area.addEventListener('pointerup', e => {
 });
 area.addEventListener('pointercancel', () => { touch = null; });
 
+function press(k, v) {
+  if (v && !held[k]) held[k + 'Spin'] = (k === 'r' ? 1 : -1) * rightSpin();
+  held[k] = v;
+}
+
 // Кнопки ← → : держите — ракетка едет
 for (const [id, k] of [['btnL', 'l'], ['btnR', 'r']]) {
   const el = document.getElementById(id);
-  const set = v => e => { e.preventDefault(); held[k] = v; el.classList.toggle('on', v); };
+  const set = v => e => { e.preventDefault(); press(k, v); el.classList.toggle('on', v); };
   el.addEventListener('pointerdown', set(true));
   for (const ev of ['pointerup', 'pointercancel', 'pointerleave']) el.addEventListener(ev, set(false));
 }
 
 // Клавиатура — для проверки на компе
-addEventListener('keydown', e => { keys[e.key] = true; if (e.key === ' ' && panel.hidden) tap(); });
-addEventListener('keyup', e => { keys[e.key] = false; });
+const KEY = { ArrowLeft: 'l', ArrowRight: 'r' };
+addEventListener('keydown', e => {
+  if (KEY[e.key]) press(KEY[e.key], true);
+  if (e.key === ' ' && panel.hidden) tap();
+});
+addEventListener('keyup', e => { if (KEY[e.key]) press(KEY[e.key], false); });
 
 // ===== Экран настроек =====
 let before = null;
