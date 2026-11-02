@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Арканоид">
+<meta name="theme-color" content="#000000">
+<title>Арканоид</title>
+<style>
+  html, body {
+    margin: 0; height: 100%; background: #000; overflow: hidden;
+    overscroll-behavior: none; user-select: none; -webkit-user-select: none;
+    -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+  }
+  /* Поле игры — без чёлки и полоски «домой»; на компе ограничено шириной телефона */
+  #game {
+    position: fixed; left: 0; right: 0; margin: 0 auto; max-width: 480px;
+    top: env(safe-area-inset-top); bottom: env(safe-area-inset-bottom);
+    touch-action: none;
+  }
+  canvas { display: block; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<div id="game"><canvas id="c"></canvas></div>
+<script>
+'use strict';
+
+// ===== Настройки =====
+const W = 360;                    // логическая ширина поля, высота считается по экрану
+const HUD = 44;                   // высота верхней панели
+const COLS = 8, GAP = 4, SIDE = 8, BRICK_H = 16, BRICKS_TOP = HUD + 36;
+const BALL_R = 6;
+const PADDLE_W = 72, PADDLE_WIDE = 116, PADDLE_H = 10;
+const BASE_SPEED = 320;           // скорость мяча, единиц поля в секунду
+const SENS = 1.3;                 // чувствительность свайпа
+const BONUS_CHANCE = 0.15, BONUS_TIME = 10, BONUS_FALL = 130;
+const MAX_LIVES = 5;
+const HUE = 190;                  // акцентный цвет (оттенок HSL)
+
+// Раскладки: '.' — пусто, '1' — обычный кирпич, '2' — на два удара
+const LEVELS = [
+  ['11111111', '11111111', '11111111', '11111111', '11111111'],
+  ['...11...', '..1111..', '.111111.', '11111111', '22222222'],
+  ['1.1.1.1.', '.2.2.2.2', '1.1.1.1.', '.2.2.2.2', '1.1.1.1.', '.1.1.1.1'],
+  ['22222222', '2......2', '2.1111.2', '2.1111.2', '2......2', '22222222'],
+  ['2..22..2', '12111121', '11111111', '1.2..2.1', '11111111', '22222222'],
+];
+
+const BONUSES = {
+  wide:  '↔',   // широкая ракетка
+  multi: '●●',  // +2 мяча
+  slow:  '½',   // медленный мяч
+  life:  '♥',   // +1 жизнь
+};
+
+// ===== Состояние =====
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const area = document.getElementById('game');
+let H = 640, scale = 1, dpr = 1;
+const paddle = { x: W / 2, y: 590, w: PADDLE_W };
+// state: serve (мяч на ракетке) | play | paused | clear (уровень пройден) | over
+const S = { state: 'serve', fresh: true, score: 0, best: loadBest(), newBest: false,
+            lives: 3, level: 1, hits: 0, wideT: 0, slowT: 0, clearT: 0, overAt: 0 };
+let bricks = [], balls = [], bonuses = [];
+const keys = {};
+
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+function loadBest() {
+  try { return +localStorage.getItem('arkanoid.best') || 0; } catch (e) { return 0; }
+}
+function saveBest() {
+  try { localStorage.setItem('arkanoid.best', S.best); } catch (e) {}
+}
+
+function resize() {
+  const r = cv.getBoundingClientRect();
+  dpr = Math.min(window.devicePixelRatio || 1, 3);
+  cv.width = Math.round(r.width * dpr);
+  cv.height = Math.round(r.height * dpr);
+  scale = r.width / W;
+  H = r.height / scale;
+  paddle.y = H - 48;
+}
+
+// ===== Ход игры =====
+function newGame() {
+  S.score = 0; S.lives = 3; S.level = 1; S.newBest = false;
+  loadLevel();
+}
+
+function loadLevel() {
+  const map = LEVELS[(S.level - 1) % LEVELS.length];
+  const bw = (W - SIDE * 2 - GAP * (COLS - 1)) / COLS;
+  bricks = [];
+  map.forEach((row, r) => [...row].forEach((ch, c) => {
+    if (ch === '.') return;
+    bricks.push({ x: SIDE + c * (bw + GAP), y: BRICKS_TOP + r * (BRICK_H + GAP),
+                  w: bw, h: BRICK_H, hp: +ch, row: r });
+  }));
+  resetRound();
+}
+
+// Новый мяч на ракетке: эффекты бонусов и разгон сбрасываются
+function resetRound() {
+  S.hits = 0; S.wideT = 0; S.slowT = 0;
+  bonuses = [];
+  balls = [{ x: paddle.x, y: paddle.y - BALL_R, vx: 0, vy: 0 }];
+  S.state = 'serve';
+}
+
+// Скорость: +15% за каждый круг из 5 уровней, разгон от ударов до +40%, бонус «медленно»
+function speed() {
+  const cycle = Math.floor((S.level - 1) / LEVELS.length);
+  return BASE_SPEED * (1 + 0.15 * cycle) * Math.min(1.4, 1 + S.hits * 0.006) * (S.slowT > 0 ? 0.65 : 1);
+}
+
+function launch() {
+  const a = (Math.random() * 40 - 20) * Math.PI / 180, v = speed(), b = balls[0];
+  b.vx = v * Math.sin(a); b.vy = -v * Math.cos(a);
+  S.state = 'play'; S.fresh = false;
+}
+
+function loseLife() {
+  S.lives--;
+  if (S.lives <= 0) { S.state = 'over'; S.overAt = performance.now(); saveBest(); }
+  else resetRound();
+}
+
+function applyBonus(k) {
+  if (k === 'wide') S.wideT = BONUS_TIME;
+  else if (k === 'slow') S.slowT = BONUS_TIME;
+  else if (k === 'life') S.lives = Math.min(MAX_LIVES, S.lives + 1);
+  else if (k === 'multi' && balls.length) {
+    const src = balls[0], v = Math.hypot(src.vx, src.vy), base = Math.atan2(src.vx, -src.vy);
+    for (const d of [-25, 25]) {
+      const a = base + d * Math.PI / 180;
+      balls.push({ x: src.x, y: src.y, vx: v * Math.sin(a), vy: -v * Math.cos(a) });
+    }
+  }
+}
+
+function hitBrick(b) {
+  for (let i = 0; i < bricks.length; i++) {
+    const k = bricks[i];
+    const cx = clamp(b.x, k.x, k.x + k.w), cy = clamp(b.y, k.y, k.y + k.h);
+    if ((b.x - cx) ** 2 + (b.y - cy) ** 2 >= BALL_R * BALL_R) continue;
+    S.score += 10; S.hits++;
+    if (S.score > S.best) { S.best = S.score; S.newBest = true; }
+    if (--k.hp <= 0) {
+      bricks.splice(i, 1);
+      if (Math.random() < BONUS_CHANCE) {
+        const kinds = Object.keys(BONUSES);
+        bonuses.push({ x: k.x + k.w / 2, y: k.y + k.h / 2, k: kinds[Math.floor(Math.random() * kinds.length)] });
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
+// Один маленький шаг мяча: по X и по Y отдельно, чтобы понять, от какой стороны отскакивать
+function step(b, h) {
+  b.x += b.vx * h;
+  if (b.x < BALL_R) { b.x = BALL_R; b.vx = Math.abs(b.vx); }
+  else if (b.x > W - BALL_R) { b.x = W - BALL_R; b.vx = -Math.abs(b.vx); }
+  else if (hitBrick(b)) { b.x -= b.vx * h; b.vx = -b.vx; }
+
+  b.y += b.vy * h;
+  if (b.y < HUD + BALL_R) { b.y = HUD + BALL_R; b.vy = Math.abs(b.vy); }
+  else if (hitBrick(b)) { b.y -= b.vy * h; b.vy = -b.vy; }
+  else if (b.vy > 0 && b.y + BALL_R >= paddle.y && b.y - BALL_R <= paddle.y + PADDLE_H
+           && Math.abs(b.x - paddle.x) <= paddle.w / 2 + BALL_R) {
+    // Угол отскока зависит от точки попадания: у края ракетки — до 60°
+    const t = clamp((b.x - paddle.x) / (paddle.w / 2), -1, 1), a = t * 60 * Math.PI / 180;
+    const v = Math.hypot(b.vx, b.vy);
+    b.vx = v * Math.sin(a); b.vy = -v * Math.cos(a); b.y = paddle.y - BALL_R;
+  }
+  if (b.y > H + BALL_R) b.dead = true;
+}
+
+function update(dt) {
+  paddle.x += ((keys.ArrowRight ? 1 : 0) - (keys.ArrowLeft ? 1 : 0)) * 450 * dt;
+  paddle.w += ((S.wideT > 0 ? PADDLE_WIDE : PADDLE_W) - paddle.w) * Math.min(1, dt * 12);
+  paddle.x = clamp(paddle.x, paddle.w / 2, W - paddle.w / 2);
+
+  if (S.state === 'serve') { balls[0].x = paddle.x; balls[0].y = paddle.y - BALL_R; return; }
+  if (S.state === 'clear') {
+    S.clearT -= dt;
+    if (S.clearT <= 0) { S.level++; loadLevel(); }
+    return;
+  }
+  if (S.state !== 'play') return;
+
+  S.wideT = Math.max(0, S.wideT - dt);
+  S.slowT = Math.max(0, S.slowT - dt);
+  const v = speed();
+  for (const b of balls) {
+    // Держим нужную скорость и не даём мячу залипнуть в почти горизонтальном полёте
+    const len = Math.hypot(b.vx, b.vy) || 1;
+    b.vx = b.vx / len * v; b.vy = b.vy / len * v;
+    if (Math.abs(b.vy) < v * 0.3) {
+      b.vy = Math.sign(b.vy || -1) * v * 0.3;
+      b.vx = Math.sign(b.vx || 1) * Math.sqrt(v * v - b.vy * b.vy);
+    }
+    const n = Math.ceil(v * dt / 3), h = dt / n;
+    for (let i = 0; i < n && !b.dead; i++) step(b, h);
+  }
+  balls = balls.filter(b => !b.dead);
+
+  for (const p of bonuses) {
+    p.y += BONUS_FALL * dt;
+    if (p.y + 7 >= paddle.y && p.y - 7 <= paddle.y + PADDLE_H && Math.abs(p.x - paddle.x) <= paddle.w / 2 + 14) {
+      p.dead = true; applyBonus(p.k);
+    }
+    if (p.y > H + 20) p.dead = true;
+  }
+  bonuses = bonuses.filter(p => !p.dead);
+
+  if (!balls.length) loseLife();
+  else if (!bricks.length) { S.state = 'clear'; S.clearT = 1.4; bonuses = []; }
+}
+
+// ===== Отрисовка =====
+function rr(x, y, w, h, r) {
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(x, y, w, h, r); else ctx.rect(x, y, w, h);
+  ctx.fill();
+}
+
+function text(s, x, y, size, color, weight = 400, align = 'center') {
+  ctx.font = `${weight} ${size}px -apple-system, system-ui, sans-serif`;
+  ctx.fillStyle = color; ctx.textAlign = align; ctx.textBaseline = 'middle';
+  ctx.fillText(s, x, y);
+}
+
+function message(lines) {
+  let y = H * 0.6 - (lines.length - 1) * 14;
+  for (const [s, size, color, weight] of lines) { text(s, W / 2, y, size, color, weight); y += 28; }
+}
+
+function draw() {
+  ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+
+  // Верхняя панель: счёт и рекорд, уровень, жизни
+  text(String(S.score), 12, 17, 20, '#fff', 600, 'left');
+  text(`рекорд ${S.best}`, 12, 36, 11, '#777', 400, 'left');
+  text(`Уровень ${S.level}`, W / 2, 22, 13, '#999');
+  ctx.fillStyle = '#fff';
+  for (let i = 0; i < S.lives; i++) {
+    ctx.beginPath(); ctx.arc(W - 14 - i * 13, 22, 4, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.fillStyle = '#1a1a1a'; ctx.fillRect(0, HUD - 1, W, 1);
+
+  for (const k of bricks) {
+    ctx.fillStyle = k.hp > 1 ? `hsl(${HUE},90%,82%)` : `hsl(${HUE},70%,${68 - k.row * 5}%)`;
+    rr(k.x, k.y, k.w, k.h, 3);
+  }
+
+  for (const p of bonuses) {
+    ctx.fillStyle = '#fff'; rr(p.x - 14, p.y - 7, 28, 14, 7);
+    text(BONUSES[p.k], p.x, p.y + 1, 10, '#000', 700);
+  }
+
+  ctx.fillStyle = '#fff';
+  rr(paddle.x - paddle.w / 2, paddle.y, paddle.w, PADDLE_H, 5);
+  for (const b of balls) { ctx.beginPath(); ctx.arc(b.x, b.y, BALL_R, 0, Math.PI * 2); ctx.fill(); }
+
+  // Оставшееся время бонусов — под ракеткой
+  const fx = [];
+  if (S.wideT > 0) fx.push(`↔ ${Math.ceil(S.wideT)}`);
+  if (S.slowT > 0) fx.push(`½ ${Math.ceil(S.slowT)}`);
+  if (fx.length) text(fx.join('    '), W / 2, H - 16, 12, '#777');
+
+  const dim = '#999', acc = `hsl(${HUE},80%,70%)`;
+  if (S.state === 'serve') {
+    message(S.fresh
+      ? [['АРКАНОИД', 28, '#fff', 700], ['ведите пальцем в любом месте', 13, dim], ['коснитесь, чтобы начать', 15, acc, 600]]
+      : [[`Уровень ${S.level}`, 20, '#fff', 600], ['коснитесь, чтобы запустить', 15, acc, 600]]);
+  } else if (S.state === 'paused') {
+    message([['Пауза', 24, '#fff', 700], ['коснитесь, чтобы продолжить', 15, acc, 600]]);
+  } else if (S.state === 'clear') {
+    message([[`Уровень ${S.level} пройден`, 22, '#fff', 700]]);
+  } else if (S.state === 'over') {
+    ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.fillRect(0, HUD, W, H - HUD);
+    message([['Игра окончена', 26, '#fff', 700], [`Счёт ${S.score}`, 18, '#fff'],
+             S.newBest ? ['Новый рекорд!', 16, acc, 600] : [`Рекорд ${S.best}`, 15, dim],
+             ['коснитесь, чтобы сыграть ещё', 15, acc, 600]]);
+  }
+}
+
+// ===== Управление =====
+function tap() {
+  if (S.state === 'serve') launch();
+  else if (S.state === 'paused') S.state = 'play';
+  else if (S.state === 'over' && performance.now() - S.overAt > 700) newGame();
+}
+
+// Палец: ракетка сдвигается на столько же, на сколько сдвинулся палец (в любом месте экрана)
+let touch = null;
+area.addEventListener('pointerdown', e => { touch = { x0: e.clientX, last: e.clientX, t: performance.now() }; });
+area.addEventListener('pointermove', e => {
+  if (e.pointerType === 'mouse') { paddle.x = (e.clientX - area.getBoundingClientRect().left) / scale; return; }
+  if (!touch) return;
+  paddle.x += (e.clientX - touch.last) / scale * SENS;
+  touch.last = e.clientX;
+});
+area.addEventListener('pointerup', e => {
+  if (touch && Math.abs(e.clientX - touch.x0) < 10 && performance.now() - touch.t < 350) tap();
+  touch = null;
+});
+area.addEventListener('pointercancel', () => { touch = null; });
+
+// Клавиатура — для проверки на компе
+addEventListener('keydown', e => { keys[e.key] = true; if (e.key === ' ') tap(); });
+addEventListener('keyup', e => { keys[e.key] = false; });
+
+// Свернули Safari — пауза и сохранение рекорда
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) return;
+  saveBest();
+  if (S.state === 'play') S.state = 'paused';
+});
+
+addEventListener('resize', resize);
+resize();
+newGame();
+
+let last = performance.now();
+function frame(t) {
+  const dt = Math.min(0.05, Math.max(0, (t - last) / 1000));
+  last = t;
+  update(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
