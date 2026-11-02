@@ -25,7 +25,7 @@
   canvas { display: block; width: 100%; height: 100%; }
   #ui { pointer-events: none; }
   #ui > * { pointer-events: auto; }
-  button { font: inherit; -webkit-tap-highlight-color: transparent; }
+  button, input { font: inherit; -webkit-tap-highlight-color: transparent; }
 
   #gear {
     position: absolute; top: 0; right: 0; width: 48px; height: 46px; padding: 0;
@@ -41,18 +41,29 @@
   #btnL { left: 16px; }
   #btnR { right: 16px; }
 
-  #settings {
+  .panel {
     position: absolute; inset: 0; background: rgba(0,0,0,0.94); color: #fff;
-    display: flex; flex-direction: column; justify-content: center; gap: 22px; padding: 24px;
+    display: flex; flex-direction: column; gap: 18px; padding: 24px; overflow-y: auto; touch-action: pan-y;
   }
-  #settings[hidden] { display: none; }
-  #settings h2 { margin: 0 0 4px; font-size: 26px; }
+  /* По центру, а если не влезает на маленький экран — прокрутка без обрезки сверху */
+  .panel > :first-child { margin-top: auto; }
+  .panel > :last-child { margin-bottom: auto; }
+  .panel[hidden] { display: none; }
+  .panel h2 { margin: 0 0 4px; font-size: 26px; }
   .label { font-size: 13px; color: #888; margin-bottom: 8px; }
   .seg { display: flex; background: #151515; border-radius: 10px; padding: 3px; }
   .seg button { flex: 1; border: 0; background: none; color: #aaa; font-size: 15px; padding: 10px 0; border-radius: 8px; }
   .seg button.on { background: hsl(190,70%,50%); color: #000; font-weight: 600; }
+  .seg.locked { opacity: 0.35; pointer-events: none; }
   .note { font-size: 12px; color: #666; }
-  #done { border: 0; border-radius: 12px; padding: 14px; font-size: 16px; font-weight: 600; background: #fff; color: #000; }
+  #name {
+    width: 100%; box-sizing: border-box; border: 0; border-radius: 10px; padding: 11px 12px;
+    background: #151515; color: #fff; font-size: 16px; user-select: text; -webkit-user-select: text;
+  }
+  #lobbyText { font-size: 15px; color: #aaa; line-height: 1.45; white-space: pre-line; overflow-wrap: anywhere; }
+  .main, .ghost { border: 0; border-radius: 12px; padding: 14px; font-size: 16px; font-weight: 600; }
+  .main { background: #fff; color: #000; }
+  .ghost { background: #151515; color: hsl(190,80%,70%); }
 </style>
 </head>
 <body>
@@ -70,7 +81,7 @@
   <button class="arrow" id="btnR" aria-label="Вправо">
     <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>
   </button>
-  <div id="settings" hidden>
+  <div id="settings" class="panel" hidden>
     <h2>Настройки</h2>
     <div><div class="label">Режим</div>
       <div class="seg" data-key="mode"><button data-v="classic">Классика</button><button data-v="round">Круг</button></div></div>
@@ -78,8 +89,17 @@
       <div class="seg" data-key="diff"><button data-v="easy">Лёгкая</button><button data-v="normal">Нормальная</button><button data-v="hard">Сложная</button></div></div>
     <div><div class="label">Управление</div>
       <div class="seg" data-key="ctrl"><button data-v="swipe">Палец</button><button data-v="buttons">Кнопки</button></div></div>
-    <div class="note">Смена режима или сложности начинает новую игру. Рекорд у каждого режима и сложности свой.</div>
-    <button id="done">Готово</button>
+    <div><div class="label">Имя — его увидит друг</div>
+      <input id="name" maxlength="12" placeholder="Игрок" autocomplete="off"></div>
+    <div class="note" id="setNote"></div>
+    <button id="mpBtn" class="ghost">Играть с другом</button>
+    <button id="done" class="main">Готово</button>
+  </div>
+  <div id="lobby" class="panel" hidden>
+    <h2>Игра с другом</h2>
+    <div id="lobbyText"></div>
+    <button id="invite" class="main" hidden>Пригласить</button>
+    <button id="cancelNet" class="ghost">Отмена</button>
   </div>
 </div>
 <script>
@@ -97,12 +117,15 @@ const BASE_SPEED = { classic: 320, round: 270 };  // единиц поля в с
 const SENS = 1.3;                 // чувствительность свайпа
 const BONUS_CHANCE = 0.15, BONUS_TIME = 10, BONUS_FALL = 130;
 const HUE = 190;                  // акцентный цвет (оттенок HSL)
+const ACC = `hsl(${HUE},80%,70%)`;
 const DIFF = {
   easy:   { name: 'лёгкая',     speed: 0.8, paddle: 1.25, lives: 5 },
   normal: { name: 'нормальная', speed: 1,   paddle: 1,    lives: 3 },
   hard:   { name: 'сложная',    speed: 1.2, paddle: 0.85, lives: 2 },
 };
 const MODE_NAME = { classic: 'классика', round: 'круг' };
+const PEERJS = 'https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js';
+const SNAP_MS = 40;               // как часто ходящий шлёт кадр зрителю (25 раз в секунду)
 
 // Классика: '.' — пусто, '1' — обычный кирпич, '2' — на два удара
 const LEVELS = [
@@ -140,16 +163,23 @@ const area = document.getElementById('game');
 const panel = document.getElementById('settings');
 let H = 640, scale = 1, dpr = 1;
 let CX = W / 2, CY = 360, R = 170, RP = 164;   // круг: центр, радиус поля, радиус ракетки
-const SET = Object.assign({ mode: 'classic', diff: 'normal', ctrl: 'swipe' }, loadJSON('arkanoid.settings'));
+const SET = Object.assign({ mode: 'classic', diff: 'normal', ctrl: 'swipe', name: '' }, loadJSON('arkanoid.settings'));
 // x, y — ракетка в классике; a — угол ракетки в круге; w — ширина (в круге — длина дуги)
 const paddle = { x: W / 2, y: 590, w: PADDLE_W.classic, a: Math.PI / 2 };
-// state: serve (мяч на ракетке) | play | paused | clear (уровень пройден) | over
+// state: serve (мяч на ракетке) | play | paused | clear (уровень пройден) | over.
+// bv — версия кирпичей: растёт при каждом ударе, чтобы слать кирпичи зрителю только когда они изменились
 const S = { state: 'serve', fresh: true, score: 0, best: 0, bestKey: '', newBest: false,
-            lives: 3, level: 1, hits: 0, wideT: 0, slowT: 0, clearT: 0, overAt: 0 };
+            lives: 3, level: 1, hits: 0, wideT: 0, slowT: 0, clearT: 0, overAt: 0, bv: 0 };
 // В круге координаты мячей, кирпичей и бонусов — от центра поля
 let bricks = [], balls = [], bonuses = [];
 // Зажатые ← → (кнопки или клавиатура); lSpin/rSpin — направление вращения в круге, взятое в момент нажатия
 const held = { l: false, r: false, lSpin: -1, rSpin: 1 };
+// Игра с другом: у каждого своя партия, ходят по очереди (потерял мяч — ход другу), второй смотрит.
+// role: host — создал комнату (ходит первым, его режим и сложность), guest — пришёл по ссылке.
+// view — последний присланный кадр партии друга
+const NET = { peer: null, conn: null, role: '', room: '', on: false, myTurn: true, ended: false,
+              other: { name: '', score: 0, lives: 0, over: false }, view: null, sentBv: -1, lastSend: 0,
+              toast: '', toastUntil: 0 };
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const angDiff = (a, b) => Math.atan2(Math.sin(a - b), Math.cos(a - b));
@@ -158,6 +188,9 @@ const paddleBase = () => PADDLE_W[SET.mode] * DIFF[SET.diff].paddle;
 
 function loadJSON(key) {
   try { return JSON.parse(localStorage.getItem(key)) || {}; } catch (e) { return {}; }
+}
+function saveSettings() {
+  try { localStorage.setItem('arkanoid.settings', JSON.stringify(SET)); } catch (e) {}
 }
 function loadBest() {
   try {
@@ -213,6 +246,7 @@ function loadLevel() {
                     w: bw, h: BRICK_H, hp: +ch, row: r });
     }));
   }
+  S.bv++;
   resetRound();
 }
 
@@ -245,6 +279,7 @@ function loseLife() {
   S.lives--;
   if (S.lives <= 0) { S.state = 'over'; S.overAt = performance.now(); saveBest(); }
   else resetRound();
+  if (NET.on) netLife();
 }
 
 function applyBonus(k) {
@@ -263,7 +298,7 @@ function applyBonus(k) {
 // Удар по кирпичу i: очки, разрушение, может выпасть бонус
 function damage(i, bx, by) {
   const k = bricks[i];
-  S.score += 10; S.hits++;
+  S.score += 10; S.hits++; S.bv++;
   if (S.score > S.best) { S.best = S.score; S.newBest = true; }
   if (--k.hp > 0) return;
   bricks.splice(i, 1);
@@ -333,6 +368,7 @@ function caught(p) {
 }
 
 function update(dt) {
+  if (NET.ended || (NET.on && !NET.myTurn)) return;   // ход друга — своя партия стоит
   paddle.w += ((S.wideT > 0 ? paddleBase() * WIDE : paddleBase()) - paddle.w) * Math.min(1, dt * 12);
   if (isRound()) {
     const spin = (held.r ? held.rSpin : 0) + (held.l ? held.lSpin : 0);
@@ -414,71 +450,125 @@ function drawBonus(p) {
   text(BONUSES[p.k], p.x, p.y + 1, 10, '#000', 700);
 }
 
-function drawBalls() {
+// Своя партия в том же виде, в каком приходит кадр от друга
+function myView() {
+  return { mode: SET.mode, H, score: S.score, lives: S.lives, level: S.level, state: S.state,
+           paddle, balls, bricks, bonuses, wideT: S.wideT, slowT: S.slowT };
+}
+
+// Поле партии v — своей или присланной другом
+function drawField(v) {
+  const round = v.mode === 'round';
+  ctx.save();
+  if (round) {
+    ctx.translate(CX, CY);
+    ctx.strokeStyle = '#1c1c1c'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(0, 0, R, 0, Math.PI * 2); ctx.stroke();
+  } else {
+    // Экран друга может быть выше нашего — тогда его поле немного уменьшаем
+    const s = Math.min(1, H / v.H);
+    ctx.translate(W * (1 - s) / 2, 0); ctx.scale(s, s);
+  }
+  for (const k of v.bricks) { ctx.fillStyle = brickColor(k); rr(k.x, k.y, k.w, k.h, 3); }
+  v.bonuses.forEach(drawBonus);
+  const p = v.paddle;
+  if (round) {
+    const half = p.w / 2 / RP;
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = PADDLE_H; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.arc(0, 0, RP, p.a - half, p.a + half); ctx.stroke();
+  } else {
+    ctx.fillStyle = '#fff'; rr(p.x - p.w / 2, p.y, p.w, PADDLE_H, 5);
+  }
   ctx.fillStyle = '#fff';
-  for (const b of balls) { ctx.beginPath(); ctx.arc(b.x, b.y, BALL_R, 0, Math.PI * 2); ctx.fill(); }
+  for (const b of v.balls) { ctx.beginPath(); ctx.arc(b.x, b.y, BALL_R, 0, Math.PI * 2); ctx.fill(); }
+
+  // Оставшееся время бонусов
+  const fx = [];
+  if (v.wideT > 0) fx.push(`↔ ${Math.ceil(v.wideT)}`);
+  if (v.slowT > 0) fx.push(`½ ${Math.ceil(v.slowT)}`);
+  if (fx.length) text(fx.join('    '), round ? 0 : W / 2, round ? R + 18 : v.H - 16, 12, '#777');
+  ctx.restore();
+}
+
+function hudPlayer(p, x, align) {
+  text(p.name, x, 11, 11, p.active ? ACC : '#777', 600, align);
+  text(p.over ? String(p.score) : `${p.score}  ${'•'.repeat(p.lives)}`, x, 30, 17, '#fff', 600, align);
+}
+
+// Верхняя панель. Один: счёт и рекорд, уровень и режим, жизни. С другом: оба игрока, кто ходит.
+function drawHud(v) {
+  if (NET.on) {
+    const me = { name: SET.name, score: S.score, lives: S.lives, over: S.state === 'over', active: NET.myTurn && !NET.ended };
+    const ot = { ...NET.other, active: !NET.myTurn && !NET.ended };
+    const [a, b] = NET.role === 'host' ? [me, ot] : [ot, me];   // создатель комнаты всегда слева
+    hudPlayer(a, 12, 'left'); hudPlayer(b, W - 52, 'right');
+    if (v) text(`Уровень ${v.level}`, W / 2, 16, 13, '#999');
+    text(NET.ended ? 'партия окончена' : NET.myTurn ? 'ваш ход' : `ходит ${NET.other.name}`, W / 2, 33, 10, ACC);
+  } else {
+    text(String(S.score), 12, 17, 20, '#fff', 600, 'left');
+    text(`рекорд ${S.best}`, 12, 36, 11, '#777', 400, 'left');
+    text(`Уровень ${S.level}`, W / 2, 16, 13, '#999');
+    text(`${MODE_NAME[SET.mode]} · ${DIFF[SET.diff].name}`, W / 2, 33, 10, '#555');
+    ctx.fillStyle = '#fff';
+    for (let i = 0; i < S.lives; i++) {
+      ctx.beginPath(); ctx.arc(W - 54 - i * 13, 22, 4, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  ctx.fillStyle = '#1a1a1a'; ctx.fillRect(0, HUD - 1, W, 1);
+}
+
+function drawMessages(v, watching) {
+  const dim = '#999', my = isRound() ? CY : H * 0.6;
+  if (NET.ended) {
+    const a = S.score, b = NET.other.score;
+    ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, HUD, W, H - HUD);
+    message([['Партия окончена', 24, '#fff', 700], [`${SET.name} ${a} — ${NET.other.name} ${b}`, 17, '#fff'],
+             [a === b ? 'Ничья' : `Победа: ${a > b ? SET.name : NET.other.name}!`, 17, ACC, 700],
+             ['коснитесь — реванш', 15, dim]], my);
+    return;
+  }
+  if (watching) {
+    const who = NET.other.name;
+    if (!v || v.state === 'serve') message([[`Ходит ${who}`, 20, '#fff', 600]], my);
+    else if (v.state === 'paused') message([[`${who} на паузе`, 18, '#fff', 600]], my);
+    else if (v.state === 'clear') message([[`${who}: уровень ${v.level} пройден`, 17, '#fff', 700]], my);
+    return;
+  }
+  const hint = SET.ctrl === 'buttons' ? 'двигайте ракетку кнопками внизу' : 'ведите пальцем в любом месте';
+  if (S.state === 'serve') {
+    message(NET.on ? [['Ваш ход', 22, '#fff', 700], ['коснитесь, чтобы запустить', 15, ACC, 600]]
+      : S.fresh ? [['АРКАНОИД', 28, '#fff', 700], [hint, 13, dim], ['коснитесь, чтобы начать', 15, ACC, 600]]
+      : [[`Уровень ${S.level}`, 20, '#fff', 600], ['коснитесь, чтобы запустить', 15, ACC, 600]], my);
+  } else if (S.state === 'paused') {
+    message([['Пауза', 24, '#fff', 700], ['коснитесь, чтобы продолжить', 15, ACC, 600]], my);
+  } else if (S.state === 'clear') {
+    message([[`Уровень ${S.level} пройден`, 22, '#fff', 700]], my);
+  } else if (S.state === 'over') {
+    ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.fillRect(0, HUD, W, H - HUD);
+    message([['Игра окончена', 26, '#fff', 700], [`Счёт ${S.score}`, 18, '#fff'],
+             S.newBest ? ['Новый рекорд!', 16, ACC, 600] : [`Рекорд ${S.best}`, 15, dim],
+             ['коснитесь, чтобы сыграть ещё', 15, ACC, 600]], my);
+  }
 }
 
 function draw() {
   ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
   ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
-
-  // Верхняя панель: счёт и рекорд, уровень и режим, жизни (справа — шестерёнка)
-  text(String(S.score), 12, 17, 20, '#fff', 600, 'left');
-  text(`рекорд ${S.best}`, 12, 36, 11, '#777', 400, 'left');
-  text(`Уровень ${S.level}`, W / 2, 16, 13, '#999');
-  text(`${MODE_NAME[SET.mode]} · ${DIFF[SET.diff].name}`, W / 2, 33, 10, '#555');
-  ctx.fillStyle = '#fff';
-  for (let i = 0; i < S.lives; i++) {
-    ctx.beginPath(); ctx.arc(W - 54 - i * 13, 22, 4, 0, Math.PI * 2); ctx.fill();
-  }
-  ctx.fillStyle = '#1a1a1a'; ctx.fillRect(0, HUD - 1, W, 1);
-
-  if (isRound()) {
-    ctx.save(); ctx.translate(CX, CY);
-    ctx.strokeStyle = '#1c1c1c'; ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.arc(0, 0, R, 0, Math.PI * 2); ctx.stroke();
-    for (const k of bricks) { ctx.fillStyle = brickColor(k); rr(k.x, k.y, k.w, k.h, 3); }
-    bonuses.forEach(drawBonus);
-    const half = paddle.w / 2 / RP;
-    ctx.strokeStyle = '#fff'; ctx.lineWidth = PADDLE_H; ctx.lineCap = 'round';
-    ctx.beginPath(); ctx.arc(0, 0, RP, paddle.a - half, paddle.a + half); ctx.stroke();
-    drawBalls();
-    ctx.restore();
-  } else {
-    for (const k of bricks) { ctx.fillStyle = brickColor(k); rr(k.x, k.y, k.w, k.h, 3); }
-    bonuses.forEach(drawBonus);
-    ctx.fillStyle = '#fff';
-    rr(paddle.x - paddle.w / 2, paddle.y, paddle.w, PADDLE_H, 5);
-    drawBalls();
-  }
-
-  // Оставшееся время бонусов
-  const fx = [];
-  if (S.wideT > 0) fx.push(`↔ ${Math.ceil(S.wideT)}`);
-  if (S.slowT > 0) fx.push(`½ ${Math.ceil(S.slowT)}`);
-  if (fx.length) text(fx.join('    '), W / 2, isRound() ? CY + R + 18 : H - 16, 12, '#777');
-
-  const dim = '#999', acc = `hsl(${HUE},80%,70%)`, my = isRound() ? CY : H * 0.6;
-  const hint = SET.ctrl === 'buttons' ? 'двигайте ракетку кнопками внизу' : 'ведите пальцем в любом месте';
-  if (S.state === 'serve') {
-    message(S.fresh
-      ? [['АРКАНОИД', 28, '#fff', 700], [hint, 13, dim], ['коснитесь, чтобы начать', 15, acc, 600]]
-      : [[`Уровень ${S.level}`, 20, '#fff', 600], ['коснитесь, чтобы запустить', 15, acc, 600]], my);
-  } else if (S.state === 'paused') {
-    message([['Пауза', 24, '#fff', 700], ['коснитесь, чтобы продолжить', 15, acc, 600]], my);
-  } else if (S.state === 'clear') {
-    message([[`Уровень ${S.level} пройден`, 22, '#fff', 700]], my);
-  } else if (S.state === 'over') {
-    ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, HUD, W, H - HUD);
-    message([['Игра окончена', 26, '#fff', 700], [`Счёт ${S.score}`, 18, '#fff'],
-             S.newBest ? ['Новый рекорд!', 16, acc, 600] : [`Рекорд ${S.best}`, 15, dim],
-             ['коснитесь, чтобы сыграть ещё', 15, acc, 600]], my);
+  const watching = NET.on && !NET.myTurn && !NET.ended;
+  const v = watching ? NET.view : myView();
+  drawHud(v);
+  if (v) drawField(v);
+  drawMessages(v, watching);
+  if (performance.now() < NET.toastUntil) {
+    ctx.fillStyle = 'rgba(0,0,0,0.85)'; rr(16, HUD + 8, W - 32, 28, 10);
+    text(NET.toast, W / 2, HUD + 22, 12, ACC, 600);
   }
 }
 
 // ===== Управление =====
 function tap() {
+  if (NET.ended) { if (performance.now() - S.overAt > 700) netRematch(); return; }
+  if (NET.on && !NET.myTurn) return;
   if (S.state === 'serve') launch();
   else if (S.state === 'paused') S.state = 'play';
   else if (S.state === 'over' && performance.now() - S.overAt > 700) newGame();
@@ -528,48 +618,229 @@ for (const [id, k] of [['btnL', 'l'], ['btnR', 'r']]) {
 const KEY = { ArrowLeft: 'l', ArrowRight: 'r' };
 addEventListener('keydown', e => {
   if (KEY[e.key]) press(KEY[e.key], true);
-  if (e.key === ' ' && panel.hidden) tap();
+  if (e.key === ' ' && panel.hidden && lobby.hidden && e.target === document.body) tap();
 });
 addEventListener('keyup', e => { if (KEY[e.key]) press(KEY[e.key], false); });
 
 // ===== Экран настроек =====
+const nameInput = document.getElementById('name'), mpBtn = document.getElementById('mpBtn');
 let before = null;
 function renderSettings() {
-  for (const seg of panel.querySelectorAll('.seg'))
+  for (const seg of panel.querySelectorAll('.seg')) {
     for (const b of seg.children) b.classList.toggle('on', b.dataset.v === SET[seg.dataset.key]);
+    // В игре с другом режим и сложность задаёт создатель комнаты
+    seg.classList.toggle('locked', !!NET.peer && seg.dataset.key !== 'ctrl');
+  }
+  mpBtn.textContent = NET.peer ? 'Выйти из игры с другом' : 'Играть с другом';
+  document.getElementById('setNote').textContent = NET.peer
+    ? 'В игре с другом режим и сложность выбирает тот, кто создал комнату.'
+    : 'Смена режима или сложности начинает новую игру. Рекорд у каждого режима и сложности свой.';
 }
 function applyCtrl() {
   document.body.classList.toggle('btns', SET.ctrl === 'buttons');
   resize();
 }
+// Закрыть настройки: сохранить, а если сменили режим или сложность — новая игра
+function closeSettings() {
+  panel.hidden = true;
+  SET.name = nameInput.value.trim().slice(0, 12);
+  saveSettings();
+  applyCtrl();
+  if (!NET.peer && (SET.mode !== before.mode || SET.diff !== before.diff)) {
+    saveBest();   // рекорд старого режима
+    newGame(); S.fresh = true;
+  }
+}
 document.getElementById('gear').addEventListener('click', () => {
-  if (S.state === 'play') S.state = 'paused';
+  if (S.state === 'play' && (!NET.on || NET.myTurn)) S.state = 'paused';
   before = { ...SET };
+  nameInput.value = SET.name;
   renderSettings();
   panel.hidden = false;
 });
 for (const seg of panel.querySelectorAll('.seg'))
   for (const b of seg.children) b.addEventListener('click', () => { SET[seg.dataset.key] = b.dataset.v; renderSettings(); });
-document.getElementById('done').addEventListener('click', () => {
-  panel.hidden = true;
-  try { localStorage.setItem('arkanoid.settings', JSON.stringify(SET)); } catch (e) {}
-  applyCtrl();
-  if (SET.mode !== before.mode || SET.diff !== before.diff) {
-    saveBest();   // рекорд старого режима
-    newGame(); S.fresh = true;
-  }
+document.getElementById('done').addEventListener('click', closeSettings);
+mpBtn.addEventListener('click', () => {
+  closeSettings();
+  if (!NET.peer) { netHost(); return; }
+  netReset();
+  saveBest(); newGame(); S.fresh = true;
 });
+
+// ===== Игра с другом =====
+// Телефоны связываются напрямую (WebRTC). Найти друг друга помогает бесплатный публичный сервер PeerJS;
+// если напрямую не пробиться, PeerJS сам идёт через свой сервер-посредник.
+const lobby = document.getElementById('lobby'), lobbyText = document.getElementById('lobbyText');
+const inviteBtn = document.getElementById('invite'), cancelBtn = document.getElementById('cancelNet');
+
+function showLobby(msg, invite = false, cancel = 'Отмена') {
+  lobbyText.textContent = msg;
+  inviteBtn.hidden = !invite;
+  cancelBtn.textContent = cancel;
+  lobby.hidden = false;
+  if (S.state === 'play') S.state = 'paused';
+}
+function netFail(msg) { netReset(); showLobby(msg, false, 'Закрыть'); }
+function toast(msg) { NET.toast = msg; NET.toastUntil = performance.now() + 4000; }
+function send(m) { if (NET.conn && NET.conn.open) NET.conn.send(m); }
+
+function askName() {
+  if (SET.name) return;
+  SET.name = (prompt('Как вас зовут? Имя увидит друг') || '').trim().slice(0, 12) || 'Игрок';
+  saveSettings();
+}
+
+// Модуль связи грузится только когда он нужен
+function loadPeer() {
+  if (window.Peer) return Promise.resolve();
+  return new Promise((ok, fail) => {
+    const s = document.createElement('script');
+    s.src = PEERJS; s.onload = ok; s.onerror = fail;
+    document.head.appendChild(s);
+  });
+}
+
+async function netHost() {
+  askName();
+  showLobby('Создаём комнату…');
+  try { await loadPeer(); } catch (e) { return netFail('Не удалось загрузить модуль связи. Проверьте интернет.'); }
+  if (lobby.hidden) return;   // пока грузилось, нажали «Отмена»
+  NET.role = 'host';
+  NET.peer = new Peer('arkanoid-' + Math.random().toString(36).slice(2, 8));
+  NET.peer.on('open', id => {
+    NET.room = id;
+    showLobby('Комната готова. Нажмите «Пригласить» и отправьте ссылку другу — игра начнётся, как только он её откроет.', true);
+  });
+  NET.peer.on('connection', c => { if (NET.conn) c.close(); else bindConn(c); });
+  bindPeer();
+}
+
+async function netJoin(room) {
+  askName();
+  showLobby('Подключаемся к комнате…');
+  try { await loadPeer(); } catch (e) { return netFail('Не удалось загрузить модуль связи. Проверьте интернет.'); }
+  if (lobby.hidden) return;
+  NET.role = 'guest'; NET.room = room;
+  NET.peer = new Peer();
+  NET.peer.on('open', () => bindConn(NET.peer.connect(room, { reliable: true })));
+  bindPeer();
+}
+
+function bindPeer() {
+  const peer = NET.peer;
+  peer.on('error', e => {
+    if (NET.on) return;   // сервер нужен только для знакомства — во время игры его ошибки не мешают
+    netFail(e.type === 'peer-unavailable' ? 'Комната не найдена. Проверьте, что у друга открыта игра, и откройте ссылку ещё раз.'
+          : e.type === 'browser-incompatible' ? 'Этот браузер не умеет играть по сети.'
+          : 'Нет связи с сервером. Попробуйте ещё раз.');
+  });
+  // Свернули Safari, чтобы отправить ссылку, — сервер знакомств отвалился, переподключаемся
+  peer.on('disconnected', () => setTimeout(() => { if (NET.peer === peer && !peer.destroyed) peer.reconnect(); }, 2000));
+}
+
+function bindConn(c) {
+  NET.conn = c;
+  c.on('open', () => send({ t: 'hello', name: SET.name, mode: SET.mode, diff: SET.diff }));
+  c.on('data', onData);
+  c.on('close', () => { if (NET.conn === c) netLost(); });
+}
+
+function onData(m) {
+  if (m.t === 'hello') {
+    NET.other.name = m.name || 'Друг';
+    if (NET.role === 'host') { send({ t: 'start' }); netStart(); }
+    else { SET.mode = m.mode; SET.diff = m.diff; applyCtrl(); }   // гость играет в режиме создателя
+  } else if (m.t === 'start' || m.t === 'rematch') {
+    netStart();
+  } else if (m.t === 'snap') {
+    NET.view = { bricks: [], ...NET.view, ...m };
+    NET.other.score = m.score; NET.other.lives = m.lives;
+  } else if (m.t === 'life') {
+    Object.assign(NET.other, { score: m.score, lives: m.lives, over: m.over });
+    if (m.pass) { NET.myTurn = true; NET.sentBv = -1; }
+    checkEnd();
+  }
+}
+
+function netStart() {
+  lobby.hidden = true;
+  Object.assign(NET, { on: true, ended: false, view: null, sentBv: -1, myTurn: NET.role === 'host' });
+  newGame(); S.fresh = false;
+  Object.assign(NET.other, { score: 0, lives: S.lives, over: false });
+}
+
+// Потерян мяч: сообщаем другу и, если он ещё в игре, передаём ему ход
+function netLife() {
+  const over = S.state === 'over', pass = !NET.other.over;
+  netSnap(true);
+  send({ t: 'life', score: S.score, lives: S.lives, over, pass });
+  if (pass) NET.myTurn = false;
+  checkEnd();
+}
+
+function checkEnd() {
+  if (S.state === 'over' && NET.other.over && !NET.ended) { NET.ended = true; S.overAt = performance.now(); }
+}
+
+function netRematch() { send({ t: 'rematch' }); netStart(); }
+
+// Кадр своей партии для зрителя. Кирпичи — только когда изменились
+function netSnap(full) {
+  const r = v => Math.round(v * 10) / 10;
+  const m = { t: 'snap', mode: SET.mode, H: r(H), score: S.score, lives: S.lives, level: S.level, state: S.state,
+    paddle: { x: r(paddle.x), y: r(paddle.y), w: r(paddle.w), a: Math.round(paddle.a * 1000) / 1000 },
+    balls: balls.map(b => ({ x: r(b.x), y: r(b.y) })),
+    bonuses: bonuses.map(p => ({ x: r(p.x), y: r(p.y), k: p.k })),
+    wideT: S.wideT, slowT: S.slowT };
+  if (full || S.bv !== NET.sentBv) {
+    m.bricks = bricks.map(({ x, y, w, h, hp, row }) => ({ x, y, w, h, hp, row }));
+    NET.sentBv = S.bv;
+  }
+  send(m);
+  NET.lastSend = performance.now();
+}
+
+// Связь оборвалась: каждый доигрывает свою партию один
+function netLost() {
+  const wasOn = NET.on;
+  if (!wasOn) return netFail('Связь оборвалась. Попробуйте ещё раз.');
+  netReset();
+  toast('Связь с другом потеряна — играете один');
+}
+
+function netReset() {
+  const { peer, conn } = NET;
+  Object.assign(NET, { peer: null, conn: null, role: '', room: '', on: false, myTurn: true, ended: false, view: null });
+  try { if (conn) conn.close(); } catch (e) {}
+  try { if (peer) peer.destroy(); } catch (e) {}
+  try { history.replaceState(null, '', location.pathname); } catch (e) {}   // убираем ?room из адреса
+}
+
+inviteBtn.addEventListener('click', async () => {
+  const url = location.origin + location.pathname + '?room=' + NET.room;
+  if (navigator.share) {
+    try { await navigator.share({ title: 'Арканоид', text: `${SET.name} зовёт сыграть в арканоид`, url }); return; }
+    catch (e) { if (e.name === 'AbortError') return; }
+  }
+  try { await navigator.clipboard.writeText(url); lobbyText.textContent = 'Ссылка скопирована — отправьте её другу:\n' + url; }
+  catch (e) { lobbyText.textContent = 'Отправьте другу ссылку:\n' + url; }
+});
+cancelBtn.addEventListener('click', () => { netReset(); lobby.hidden = true; });
 
 // Свернули Safari — пауза и сохранение рекорда
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) return;
   saveBest();
-  if (S.state === 'play') S.state = 'paused';
+  if (S.state === 'play' && (!NET.on || NET.myTurn)) S.state = 'paused';
 });
 
 addEventListener('resize', resize);
 applyCtrl();
 newGame();
+// Пришли по ссылке-приглашению
+const room = new URLSearchParams(location.search).get('room');
+if (room) netJoin(room);
 
 let last = performance.now();
 function frame(t) {
@@ -577,6 +848,7 @@ function frame(t) {
   last = t;
   update(dt);
   draw();
+  if (NET.on && NET.myTurn && !NET.ended && t - NET.lastSend > SNAP_MS) netSnap(false);
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
